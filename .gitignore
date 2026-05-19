@@ -1,0 +1,28 @@
+# --- Arquivos de Dados e Resultados do Projeto ---
+resultados/
+corpus_grande.txt
+
+# --- Configurações do VS Code ---
+.vscode/
+.history/
+*.code-workspace
+
+# --- NIM ---
+nimcache/
+nimblecache/
+htmldocs/
+*.exe
+*.out
+*.app
+
+# --- JAVA ---
+*.class
+*.log
+*.ctxt
+*.jar
+*.war
+*.ear
+*.nar
+target/
+.gradle/
+build/
