@@ -1,4 +1,4 @@
-package java_versions;
+package com.tf_idf;
 
 import java.io.BufferedReader;
 import java.io.FileReader;
