@@ -1,13 +1,6 @@
 package com.tf_idf;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.RandomAccessFile;
+import java.io.*;
 import java.nio.channels.Channels;
 import java.util.*;
 import java.util.concurrent.Executors;
@@ -24,7 +17,7 @@ public class v3_virtual_threads {
 
     private static class ThreadResult {
         long docCount = 0;
-        Map<String, Integer> localDocumentsWithTerm = new HashMap<>();
+        Map<String, Integer> localDocumentsWithTerm = new HashMap<>(1024);
     }
 
     public static void main(String[] args) {
@@ -34,51 +27,49 @@ public class v3_virtual_threads {
         int numTasks = segments.size();
         ThreadResult[] threadResults = new ThreadResult[numTasks];
 
-        // PASSO 1: Frequência Documental
+        // PASSO 1: Frequência Documental com Virtual Threads manuais
         System.out.println("Iniciando Passo 1 (IDF) com " + numTasks + " Virtual Threads...");
-        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            for (int i = 0; i < numTasks; i++) {
-                final Segment segment = segments.get(i);
-                final int taskId = i;
-                threadResults[taskId] = new ThreadResult();
+        List<Thread> threads1 = new ArrayList<>();
+        for (int i = 0; i < numTasks; i++) {
+            final Segment segment = segments.get(i);
+            final int taskId = i;
+            threadResults[taskId] = new ThreadResult();
 
-                executor.submit(() -> {
-                    ThreadResult result = threadResults[taskId];
-                    try (RandomAccessFile raf = new RandomAccessFile(FILE_PATH, "r")) {
-                        raf.seek(segment.start());
-                        try (var is = Channels.newInputStream(raf.getChannel());
-                             var reader = new BufferedReader(new InputStreamReader(is))) {
-                            String row;
-                            long bytesRead = 0;
-                            while (bytesRead < segment.size() && (row = reader.readLine()) != null) {
-                                bytesRead += row.getBytes().length + 1;
-                                result.docCount++;
+            threads1.add(Thread.ofVirtual().name("V-IDF-" + i).start(() -> {
+                ThreadResult result = threadResults[taskId];
+                try (RandomAccessFile raf = new RandomAccessFile(FILE_PATH, "r")) {
+                    raf.seek(segment.start());
+                    try (var is = Channels.newInputStream(raf.getChannel());
+                         var reader = new BufferedReader(new InputStreamReader(is), 65536)) {
+                        String row;
+                        long bytesRead = 0;
+                        while (bytesRead < segment.size() && (row = reader.readLine()) != null) {
+                            bytesRead += row.getBytes().length + 1;
+                            result.docCount++;
+                            StringTokenizer st = new StringTokenizer(row.toLowerCase());
+                            Set<String> uniqueTerms = new HashSet<>();
+                            while (st.hasMoreTokens()) uniqueTerms.add(st.nextToken());
                                 
-                                // OTIMIZAÇÃO: StringTokenizer + HashSet local
-                                StringTokenizer st = new StringTokenizer(row.toLowerCase());
-                                Set<String> uniqueTerms = new HashSet<>();
-                                while (st.hasMoreTokens()) uniqueTerms.add(st.nextToken());
-                                
-                                for (String term : uniqueTerms) {
-                                    result.localDocumentsWithTerm.merge(term, 1, Integer::sum);
-                                }
+                            for (String term : uniqueTerms) {
+                                result.localDocumentsWithTerm.merge(term, 1, Integer::sum);
                             }
                         }
-                    } catch (IOException e) { e.printStackTrace(); }
-                });
-            }
+                    }
+                } catch (IOException e) { e.printStackTrace(); }
+            }));
         }
+        joinThreads(threads1);
 
         // Consolidação
-        Map<String, Integer> documentsWithTerm = new HashMap<>();
+        Map<String, Integer> documentsWithTerm = new HashMap<>(10000);
         long totalDocuments = 0;
         for (ThreadResult tr : threadResults) {
             totalDocuments += tr.docCount;
             tr.localDocumentsWithTerm.forEach((k, v) -> documentsWithTerm.merge(k, v, Integer::sum));
         }
 
-        // PASSO 2: TF-IDF
-        System.out.println("Iniciando Passo 2 (TF-IDF) com " + numTasks + " Virtual Threads...");
+        // PASSO 2: TF-IDF com Virtual Threads manuais
+        System.out.println("Iniciando Passo 2 (TF-IDF)...");
         long[] lineOffsets = new long[numTasks];
         long currentOffset = 0;
         for (int i = 0; i < numTasks; i++) {
@@ -86,59 +77,57 @@ public class v3_virtual_threads {
             currentOffset += threadResults[i].docCount;
         }
 
-        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            for (int i = 0; i < numTasks; i++) {
-                final Segment segment = segments.get(i);
-                final int taskId = i;
-                final long totalDocsCount = totalDocuments;
-                final long startLine = lineOffsets[taskId];
+        List<Thread> threads2 = new ArrayList<>();
+        for (int i = 0; i < numTasks; i++) {
+            final Segment segment = segments.get(i);
+            final int taskId = i;
+            final long totalDocsCount = totalDocuments;
+            final long startLine = lineOffsets[taskId];
 
-                executor.submit(() -> {
-                    String tempPartFile = RESULT_FILE + ".part" + segment.id();
-                    long currentLine = startLine;
-                    
-                    // OTIMIZAÇÃO: Reutilização de objetos
-                    Map<String, Integer> freq = new HashMap<>(64);
-                    StringBuilder sb = new StringBuilder(256);
+            threads2.add(Thread.ofVirtual().name("V-TFIDF-" + i).start(() -> {
+                String tempPartFile = RESULT_FILE + ".part" + segment.id();
+                long currentLine = startLine;
+                Map<String, Integer> freq = new HashMap<>(64);
+                StringBuilder sb = new StringBuilder(256);
 
-                    try (RandomAccessFile raf = new RandomAccessFile(FILE_PATH, "r");
-                         BufferedWriter bw = new BufferedWriter(new FileWriter(tempPartFile))) {
-                        raf.seek(segment.start());
-                        try (var is = Channels.newInputStream(raf.getChannel());
-                             var reader = new BufferedReader(new InputStreamReader(is))) {
-                            String row;
-                            long bytesRead = 0;
-                            while (bytesRead < segment.size() && (row = reader.readLine()) != null) {
-                                bytesRead += row.getBytes().length + 1;
-                                currentLine++;
+                try (RandomAccessFile raf = new RandomAccessFile(FILE_PATH, "r");
+                     BufferedWriter bw = new BufferedWriter(new FileWriter(tempPartFile))) {
+                    raf.seek(segment.start());
+                    try (var is = Channels.newInputStream(raf.getChannel());
+                         var reader = new BufferedReader(new InputStreamReader(is))) {
+                        String row;
+                        long bytesRead = 0;
+                        while (bytesRead < segment.size() && (row = reader.readLine()) != null) {
+                            bytesRead += row.getBytes().length + 1;
+                            currentLine++;
                                 
-                                freq.clear();
-                                StringTokenizer st = new StringTokenizer(row.toLowerCase());
-                                int wordCount = 0;
-                                while(st.hasMoreTokens()) {
-                                    freq.merge(st.nextToken(), 1, Integer::sum);
-                                    wordCount++;
-                                }
-
-                                sb.setLength(0);
-                                for (Map.Entry<String, Integer> entry : freq.entrySet()) {
-                                    double tf = (double) entry.getValue() / wordCount;
-                                    double idf = Math.log((double) totalDocsCount / documentsWithTerm.get(entry.getKey()));
-                                    sb.append(currentLine).append(';').append(entry.getKey()).append(';')
-                                      .append(String.format(Locale.US, "%.10f", tf * idf)).append('\n');
-                                }
-                                bw.write(sb.toString());
+                            freq.clear();
+                            StringTokenizer st = new StringTokenizer(row.toLowerCase());
+                            int wordCount = 0;
+                            while(st.hasMoreTokens()) {
+                                freq.merge(st.nextToken(), 1, Integer::sum);  
+                                wordCount++;
                             }
+                            
+                            sb.setLength(0);
+                            for (Map.Entry<String, Integer> entry : freq.entrySet()) {
+                                double tf = (double) entry.getValue() / wordCount;
+                                double idf = Math.log((double) totalDocsCount / documentsWithTerm.get(entry.getKey()));
+                                sb.append(currentLine).append(';').append(entry.getKey()).append(';')
+                                  .append(String.format(Locale.US, "%.10f", tf * idf)).append('\n');
+                            }
+                            bw.write(sb.toString());
                         }
-                    } catch (IOException e) { e.printStackTrace(); }
-                });
-            }
+                    }
+                } catch (IOException e) { e.printStackTrace(); }
+            }));
         }
+        joinThreads(threads2);
 
         mergePartFiles(numTasks);
         System.out.println("Processamento concluído em " + (System.currentTimeMillis() - globalStart) + " ms!");
     }
-    
+
     
     /**
      * Modificado para fatiar o arquivo em pedaços de tamanho fixo (Ex: 10MB)
@@ -166,6 +155,17 @@ public class v3_virtual_threads {
             return segments;
         } catch (IOException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    private static void joinThreads(List<Thread> threads) {
+        for (Thread thread : threads) {
+            try {
+                thread.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
         }
     }
 
@@ -208,23 +208,25 @@ public class v3_virtual_threads {
         
         Result[] results = new Result[numTasks];
 
-        // Passo 1: IDF (Consolidação em memória)
-        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            for (int i = 0; i < numTasks; i++) {
-                int start = i * chunkSize;
-                int end = (i == numTasks - 1) ? totalLinhas : (start + chunkSize);
-                List<String> subList = linhas.subList(start, end);
-                results[i] = new Result();
-                int idx = i;
-                executor.submit(() -> {
-                    for (String row : subList) {
-                        StringTokenizer st = new StringTokenizer(row.toLowerCase());
-                        while (st.hasMoreTokens()) results[idx].map.merge(st.nextToken(), 1, Integer::sum);
-                        results[idx].docCount++;
-                    }
-                });
-            }
+        // Passo 1: IDF (Consolidação em memória) com Virtual Threads manuais
+        List<Thread> threads1 = new ArrayList<>();
+        for (int i = 0; i < numTasks; i++) {
+            int start = i * chunkSize;
+            int end = (i == numTasks - 1) ? totalLinhas : (start + chunkSize);
+            List<String> subList = linhas.subList(start, end);
+            results[i] = new Result();
+            int idx = i;
+            
+            threads1.add(Thread.ofVirtual().name("JMH-V-IDF-" + i).start(() -> {
+                for (String row : subList) {
+                    StringTokenizer st = new StringTokenizer(row.toLowerCase());
+                    while (st.hasMoreTokens()) results[idx].map.merge(st.nextToken(), 1, Integer::sum);
+                    results[idx].docCount++;
+                }
+            }));
         }
+        // Aguarda conclusão do Passo 1
+        joinThreads(threads1);
 
         Map<String, Integer> globalMap = new HashMap<>();
         long totalDocs = 0;
@@ -233,30 +235,33 @@ public class v3_virtual_threads {
             r.map.forEach((k, v) -> globalMap.merge(k, v, Integer::sum)); 
         }
 
-        // Passo 2: TF-IDF (Benchmark)
-        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            for (int i = 0; i < numTasks; i++) {
-                int start = i * chunkSize;
-                int end = (i == numTasks - 1) ? totalLinhas : (start + chunkSize);
-                List<String> subList = linhas.subList(start, end);
-                int idx = i;
-                long total = totalDocs;
-                executor.submit(() -> {
-                    Map<String, Integer> freq = new HashMap<>(64);
-                    for (String row : subList) {
-                        freq.clear();
-                        StringTokenizer st = new StringTokenizer(row.toLowerCase());
-                        int wCount = 0;
-                        while (st.hasMoreTokens()) { freq.merge(st.nextToken(), 1, Integer::sum); wCount++; }
-                        for (var entry : freq.entrySet()) {
-                            double tf = (double) entry.getValue() / wCount;
-                            double idf = Math.log((double) total / globalMap.get(entry.getKey()));
-                            results[idx].checksum += (tf * idf);
-                        }
+        // Passo 2: TF-IDF (Benchmark) com Virtual Threads manuais
+        List<Thread> threads2 = new ArrayList<>();
+        for (int i = 0; i < numTasks; i++) {
+            int start = i * chunkSize;
+            int end = (i == numTasks - 1) ? totalLinhas : (start + chunkSize);
+            List<String> subList = linhas.subList(start, end);
+            int idx = i;
+            long total = totalDocs;
+            
+            threads2.add(Thread.ofVirtual().name("JMH-V-TFIDF-" + i).start(() -> {
+                Map<String, Integer> freq = new HashMap<>(64);
+                for (String row : subList) {
+                    freq.clear();
+                    StringTokenizer st = new StringTokenizer(row.toLowerCase());
+                    int wCount = 0;
+                    while (st.hasMoreTokens()) { freq.merge(st.nextToken(), 1, Integer::sum); wCount++; }
+                    for (var entry : freq.entrySet()) {
+                        double tf = (double) entry.getValue() / wCount;
+                        double idf = Math.log((double) total / globalMap.get(entry.getKey()));
+                        results[idx].checksum += (tf * idf);
                     }
-                });
-            }
+                }
+            }));
         }
+        // Aguarda conclusão do Passo 2
+        joinThreads(threads2);
+
         return Arrays.stream(results).mapToDouble(r -> r.checksum).sum();
     }
 }

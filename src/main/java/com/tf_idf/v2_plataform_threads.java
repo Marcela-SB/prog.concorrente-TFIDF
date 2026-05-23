@@ -1,13 +1,6 @@
 package com.tf_idf;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.RandomAccessFile;
+import java.io.*;
 import java.nio.channels.Channels;
 import java.util.*;
 
@@ -27,45 +20,40 @@ public class v2_plataform_threads {
         long globalStart = System.currentTimeMillis();
 
         List<Segment> segments = getSegments();
-        int numThreads = segments.size();
+        int numTasks = segments.size();
+        
+        ThreadResult[] threadResults = new ThreadResult[numTasks];
 
-        ThreadResult[] threadResults = new ThreadResult[numThreads];
-        Thread[] threads = new Thread[numThreads];
+        System.out.println("Iniciando Passo 1 (IDF) com " + numTasks + " Platform Threads...");
 
-        System.out.println("Iniciando Passo 1 (IDF) com " + numThreads + " Platform Threads...");
-
-        for (int i = 0; i < numThreads; i++) {
+        List<Thread> threads1 = new ArrayList<>();
+        for (int i = 0; i < numTasks; i++) {
             final Segment segment = segments.get(i);
             final int threadId = i;
             threadResults[threadId] = new ThreadResult();
 
-            threads[threadId] = Thread.ofPlatform()
-                    .name("passo1-thread-seg-" + segment.id()) 
-                    .start(() -> {
-                        ThreadResult result = threadResults[threadId];
-                        try (RandomAccessFile raf = new RandomAccessFile(FILE_PATH, "r")) {
-                            raf.seek(segment.start());
-                            try (var is = Channels.newInputStream(raf.getChannel());
-                                 var reader = new BufferedReader(new InputStreamReader(is))) {
-                                String row;
-                                long bytesRead = 0;
-                                while (bytesRead < segment.size() && (row = reader.readLine()) != null) {
-                                    bytesRead += row.getBytes().length + 1;
-                                    
-                                    // OTIMIZAÇÃO: StringTokenizer evita RegEx pesada
-                                    StringTokenizer st = new StringTokenizer(row.toLowerCase());
-                                    if (!st.hasMoreTokens()) continue;
-
-                                    result.docCount++;
-                                    while (st.hasMoreTokens()) {
-                                        result.localDocumentsWithTerm.merge(st.nextToken(), 1, Integer::sum);
-                                    }
-                                }
+            threads1.add(Thread.ofPlatform().name("IDF-Thread-" + i).start(() -> {
+                ThreadResult result = threadResults[threadId];
+                try (RandomAccessFile raf = new RandomAccessFile(FILE_PATH, "r")) {
+                    raf.seek(segment.start());
+                    try (var is = Channels.newInputStream(raf.getChannel());
+                         var reader = new BufferedReader(new InputStreamReader(is))) {
+                        String row;
+                        long bytesRead = 0;
+                        while (bytesRead < segment.size() && (row = reader.readLine()) != null) {
+                            bytesRead += row.getBytes().length + 1;
+                            StringTokenizer st = new StringTokenizer(row.toLowerCase());
+                            if (!st.hasMoreTokens()) continue;
+                            result.docCount++;
+                            while (st.hasMoreTokens()) {
+                                result.localDocumentsWithTerm.merge(st.nextToken(), 1, Integer::sum);
                             }
-                        } catch (IOException e) { e.printStackTrace(); }
-                    });
+                        }
+                    }
+                } catch (IOException e) { e.printStackTrace(); }
+            }));
         }
-        joinThreads(threads);
+        joinThreads(threads1);
 
         Map<String, Integer> documentsWithTerm = new HashMap<>();
         long totalDocuments = 0;
@@ -75,26 +63,24 @@ public class v2_plataform_threads {
         }
 
         System.out.println("Passo 1 concluído. Total de documentos: " + totalDocuments);
-
-        System.out.println("Iniciando Passo 2 (TF-IDF) em paralelo...");
-        long[] lineOffsets = new long[numThreads];
+        long[] lineOffsets = new long[numTasks];
         long currentOffset = 0;
-        for (int i = 0; i < numThreads; i++) {
+        for (int i = 0; i < numTasks; i++) {
             lineOffsets[i] = currentOffset;
             currentOffset += threadResults[i].docCount;
         }
 
-        threads = new Thread[numThreads]; 
-        for (int i = 0; i < numThreads; i++) {
-            final Segment segment = segments.get(i);
+        // Passo 2: TF-IDF
+        List<Thread> threads2 = new ArrayList<>();
+        for (int i = 0; i < numTasks; i++) {
             final int threadId = i;
+            final Segment segment = segments.get(i);
             final long totalDocsCount = totalDocuments;
             final long startLine = lineOffsets[threadId];
 
-            threads[threadId] = Thread.ofPlatform().start(() -> {
+            threads2.add(Thread.ofPlatform().name("TFIDF-Thread-" + i).start(() -> {
                 String tempPartFile = RESULT_FILE + ".part" + segment.id();
                 long currentLine = startLine;
-                // OTIMIZAÇÃO: Reutilização de Map para evitar milhões de alocações
                 Map<String, Integer> freq = new HashMap<>(64);
                 StringBuilder sb = new StringBuilder(256);
 
@@ -107,7 +93,6 @@ public class v2_plataform_threads {
                         long bytesRead = 0;
                         while (bytesRead < segment.size() && (row = reader.readLine()) != null) {
                             bytesRead += row.getBytes().length + 1;
-                            
                             freq.clear();
                             StringTokenizer st = new StringTokenizer(row.toLowerCase());
                             int wordCount = 0;
@@ -116,9 +101,8 @@ public class v2_plataform_threads {
                                 wordCount++;
                             }
                             if (wordCount == 0) continue;
-                            
                             currentLine++;
-                            sb.setLength(0); // Limpa o buffer de escrita
+                            sb.setLength(0);
                             for (Map.Entry<String, Integer> entry : freq.entrySet()) {
                                 double tf = (double) entry.getValue() / wordCount;
                                 double idf = Math.log((double) totalDocsCount / documentsWithTerm.get(entry.getKey()));
@@ -129,10 +113,10 @@ public class v2_plataform_threads {
                         }
                     }
                 } catch (IOException e) { e.printStackTrace(); }
-            });
+            }));
         }
-        joinThreads(threads);
-        mergePartFiles(numThreads);
+        joinThreads(threads2);
+        mergePartFiles(numTasks);
         System.out.println("Processamento concluído em " + (System.currentTimeMillis() - globalStart) + " ms!");
     }
 
@@ -144,11 +128,9 @@ public class v2_plataform_threads {
             List<Segment> segments = new ArrayList<>();
             long filePos = 0;
             int id = 0;
-
             while (filePos < totalSize - segmentSize) {
                 file.seek(filePos + segmentSize);
-                while (file.read() != '\n')
-                    ;
+                while (file.read() != '\n');
                 segments.add(new Segment(id++, filePos, (int) (file.getFilePointer() - filePos)));
                 filePos = file.getFilePointer();
             }
@@ -159,7 +141,7 @@ public class v2_plataform_threads {
         }
     }
 
-    private static void joinThreads(Thread[] threads) {
+    private static void joinThreads(List<Thread> threads) {
         for (Thread thread : threads) {
             try {
                 thread.join();
@@ -205,9 +187,9 @@ public class v2_plataform_threads {
         int chunkSize = totalLinhas / numThreads;
 
         ThreadResultJMH[] threadResults = new ThreadResultJMH[numThreads];
-        Thread[] threads = new Thread[numThreads];
 
-        // Passo 1: IDF (em memória)
+        // Passo 1: IDF com Platform Threads manuais
+        List<Thread> threads1 = new ArrayList<>();
         for (int i = 0; i < numThreads; i++) {
             int start = i * chunkSize;
             int end = (i == numThreads - 1) ? totalLinhas : (start + chunkSize);
@@ -215,16 +197,15 @@ public class v2_plataform_threads {
             
             threadResults[i] = new ThreadResultJMH();
             int finalI = i;
-            threads[i] = Thread.ofPlatform().start(() -> {
+
+            threads1.add(Thread.ofPlatform().name("JMH-IDF-" + i).start(() -> {
                 for (String row : subList) {
-                    // OTIMIZAÇÃO 1: Usando StringTokenizer em vez de .split("\\s+")
-                    // Evita criar um Array de strings e não processa RegEx repetidamente
                     StringTokenizer st = new StringTokenizer(row.toLowerCase());
                     Set<String> unicTerms = new HashSet<>();
                     while (st.hasMoreTokens()) {
                         unicTerms.add(st.nextToken());
                     }
-                    
+
                     for (String term : unicTerms) {
                         if (!term.isEmpty()) {
                             threadResults[finalI].localDocumentsWithTerm.merge(term, 1, Integer::sum);
@@ -232,9 +213,9 @@ public class v2_plataform_threads {
                     }
                     threadResults[finalI].docCount++;
                 }
-            });
+            }));
         }
-        joinThreads(threads);
+        joinThreads(threads1);
 
         // Consolidação (IDF Global)
         Map<String, Integer> documentsWithTerm = new HashMap<>();
@@ -244,22 +225,23 @@ public class v2_plataform_threads {
             tr.localDocumentsWithTerm.forEach((k, v) -> documentsWithTerm.merge(k, v, Integer::sum));
         }
 
-        // Passo 2: TF-IDF
+        // Passo 2: TF-IDF com Platform Threads manuais
+        List<Thread> threads2 = new ArrayList<>();
         for (int i = 0; i < numThreads; i++) {
             int start = i * chunkSize;
             int end = (i == numThreads - 1) ? totalLinhas : (start + chunkSize);
             List<String> subList = linhas.subList(start, end);
             
-            int finalI = i; // Referência para o array
+            int finalI = i; 
             long finalTotal = totalDocuments;
-            
-            threads[i] = Thread.ofPlatform().start(() -> {
-                Map<String, Integer> freq = new HashMap<>(64); 
+
+            threads2.add(Thread.ofPlatform().name("JMH-TFIDF-" + i).start(() -> {
+                Map<String, Integer> freq = new HashMap<>(64);
                 for (String row : subList) {
                     freq.clear();
                     StringTokenizer st = new StringTokenizer(row.toLowerCase());
                     int wordCount = 0;
-                    
+                
                     while (st.hasMoreTokens()) {
                         String p = st.nextToken();
                         if (!p.isEmpty()) {
@@ -267,18 +249,16 @@ public class v2_plataform_threads {
                             wordCount++;
                         }
                     }
-                    
+                
                     for (Map.Entry<String, Integer> entry : freq.entrySet()) {
                         double tf = (double) entry.getValue() / wordCount;
                         double idf = Math.log((double) finalTotal / documentsWithTerm.get(entry.getKey()));
-                        
-                        // CORREÇÃO AQUI: Acumular no campo da PRÓPRIA thread
                         threadResults[finalI].localChecksum += (tf * idf);
                     }
                 }
-            });
+            }));
         }
-        joinThreads(threads);
+        joinThreads(threads2);
 
         // SOMA FINAL: Consolida os resultados das threads
         double totalChecksum = 0.0;
