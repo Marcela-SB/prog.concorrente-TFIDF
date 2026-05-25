@@ -1,6 +1,8 @@
 # --- Arquivos de Dados e Resultados do Projeto ---
+JMC/
 resultados/
 corpus_grande.txt
+corpus_test.txt
 
 # --- Configurações do VS Code ---
 .vscode/

@@ -1,3 +1,4 @@
+package com.tf_idf.AUXILIARES;
 import java.io.BufferedOutputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -6,8 +7,13 @@ import java.util.Random;
 public class GeradorRealistaTFIDF {
 
     public static void main(String[] args) {
-        String caminhoArquivo = "corpus_grande.txt";
-        long tamanhoAlvoBytes = 1024L * 1024L * 1024L; // 1 GB
+        //OFICIAL
+        // String caminhoArquivo = "corpus_grande.txt";
+        // long tamanhoAlvoBytes = 1024L * 1024L * 1024L; // 1 GB
+
+        //TESTE
+        String caminhoArquivo = "corpus_test.txt";
+        long tamanhoAlvoBytes = 200L * 1024L * 1024L; // 200 MB
         
         // Dicionário expandido para simular diversidade temática
         String[] sementes = {
